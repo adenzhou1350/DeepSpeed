@@ -1909,6 +1909,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.clear_grad_attribute(param)
             self.previous_reduced_grads[dtype].clear()
 
+    def _has_previous_reduced_grads(self):
+        return any(self.previous_reduced_grads.values())
+
     # if rank is specified do a reduction instead of an allreduce
     def allreduce_and_copy(self,
                            small_bucket,
@@ -1919,7 +1922,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            process_group=None):
         process_group = self.dp_process_group if process_group is None else process_group
         if self.overlap_comm:
-            if not get_accelerator().resolves_data_dependency():
+            # Non-contiguous gradients are retained until the next reduction so
+            # their storage cannot be cleared while the prior collective is still
+            # using it. Contiguous IPG buckets do not populate this list, and their
+            # producer/reuse dependencies are already stream/event ordered. Avoid a
+            # device-wide synchronization on every rank-specific reduce in that
+            # common path.
+            if self._has_previous_reduced_grads() and not get_accelerator().resolves_data_dependency():
                 get_accelerator().synchronize()
             # It is safe to clear the previously reduced grads of other partitions
             self._clear_previous_reduced_grads()

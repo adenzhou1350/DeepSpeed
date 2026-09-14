@@ -37,6 +37,7 @@ class _FakeAccelerator:
     def __init__(self, resolves_data_dependency, current_device_name="cpu"):
         self._resolves_data_dependency = resolves_data_dependency
         self._current_device_name = current_device_name
+        self.synchronize_calls = 0
 
     def resolves_data_dependency(self):
         return self._resolves_data_dependency
@@ -51,7 +52,7 @@ class _FakeAccelerator:
         return self._current_device_name
 
     def synchronize(self):
-        return None
+        self.synchronize_calls += 1
 
 
 def _build_overlap_optimizer(monkeypatch, *, resolves_data_dependency):
@@ -67,11 +68,9 @@ def _build_overlap_optimizer(monkeypatch, *, resolves_data_dependency):
     optimizer.allreduce_bucket = lambda *args, **kwargs: allreduced
     optimizer.unflatten = lambda allreduced_tensor, small_bucket: synced
 
-    monkeypatch.setattr(
-        zero_stage12,
-        "get_accelerator",
-        lambda: _FakeAccelerator(resolves_data_dependency),
-    )
+    accelerator = _FakeAccelerator(resolves_data_dependency)
+    optimizer._test_accelerator = accelerator
+    monkeypatch.setattr(zero_stage12, "get_accelerator", lambda: accelerator)
     monkeypatch.setattr(zero_stage12.dist, "get_rank", lambda group=None: 0)
     return optimizer, allreduced, synced
 
@@ -86,6 +85,21 @@ def test_allreduce_and_copy_records_stream_for_overlap_comm(monkeypatch):
     for buf, expected_synced in zip(bucket, synced):
         assert buf.copied_from is expected_synced
         assert buf.recorded_streams == [optimizer.reduction_stream]
+    assert optimizer._test_accelerator.synchronize_calls == 0
+
+
+def test_allreduce_and_copy_synchronizes_before_clearing_retained_gradients(monkeypatch):
+    optimizer, _, _ = _build_overlap_optimizer(monkeypatch, resolves_data_dependency=False)
+    retained = object()
+    optimizer.previous_reduced_grads = {torch.float16: [retained]}
+    cleared = []
+    optimizer.clear_grad_attribute = cleared.append
+
+    optimizer.allreduce_and_copy([_FakeTensor()], torch.float16)
+
+    assert optimizer._test_accelerator.synchronize_calls == 1
+    assert cleared == [retained]
+    assert optimizer.previous_reduced_grads == {torch.float16: []}
 
 
 def test_allreduce_and_copy_with_multiple_ranks_records_only_local_buffers(monkeypatch):
@@ -416,7 +430,7 @@ class _MultiBucketModel(torch.nn.Module):
         return inputs
 
 
-def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0):
+def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0, use_multi_rank_bucket_allreduce=True):
     model = _MultiBucketModel().to(dtype=torch.bfloat16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     config = {
@@ -431,6 +445,7 @@ def _run_zero2_buffer_reuse(overlap_comm, reduce_bucket_size, delay_cycles=0):
             "contiguous_gradients": True,
             "reduce_scatter": True,
             "reduce_bucket_size": reduce_bucket_size,
+            "use_multi_rank_bucket_allreduce": use_multi_rank_bucket_allreduce,
         },
     }
     engine, *_ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
@@ -537,3 +552,22 @@ class TestZero2IPGBufferReuse(DistributedTest):
         assert overlap[3] >= 2
         assert overlap[4] > 0
         _assert_zero2_runs_match(overlap, reference)
+
+    @pytest.mark.parametrize("reduce_bucket_size", [20, 48])
+    def test_owner_reduce_overlap_matches_allreduce_reference(self, reduce_bucket_size):
+        if not bf16_required_version_check():
+            pytest.skip("BF16 ZeRO-2 test requires BF16 accelerator support.")
+        _require_cuda_sleep()
+
+        reference = _run_zero2_buffer_reuse(overlap_comm=True,
+                                            reduce_bucket_size=reduce_bucket_size,
+                                            delay_cycles=int(2e7),
+                                            use_multi_rank_bucket_allreduce=True)
+        owner_reduce = _run_zero2_buffer_reuse(overlap_comm=True,
+                                               reduce_bucket_size=reduce_bucket_size,
+                                               delay_cycles=int(2e7),
+                                               use_multi_rank_bucket_allreduce=False)
+
+        assert owner_reduce[3] >= 2
+        assert owner_reduce[4] > 0
+        _assert_zero2_runs_match(owner_reduce, reference)
