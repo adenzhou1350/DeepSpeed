@@ -111,7 +111,8 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     backend = SimpleNamespace(using_mpi=False, is_initialized=lambda: True, get_world_size=lambda group=None: 2)
     setattr(backend, op_name, backend_op)
     monkeypatch.setattr(comm, 'cdb', backend)
-    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=lambda: None))
+    synchronize = Mock()
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=synchronize))
     op_timer = Mock()
     op_timer.elapsed.return_value = 1.0
     timers = Mock(return_value=op_timer)
@@ -151,7 +152,9 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
     if profile_mode == 'unselected':
         assert comm.comms_logger.comms_dict == {}
         timers.assert_not_called()
+        synchronize.assert_not_called()
     else:
+        synchronize.assert_called_once_with()
         record_name, = comm.comms_logger.comms_dict
         if debug:
             assert record_name.startswith(log_name + ' | [Caller Func: ')
@@ -164,6 +167,39 @@ def test_collective_profiling(monkeypatch, op_name, positional, debug, profile_m
         op_timer.stop.assert_called_once_with()
         op_timer.elapsed.assert_called_once_with(reset=False)
         assert all(call.args == (record_name, ) for call in timers.call_args_list)
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_timed_op_preserves_mpi_barrier_with_selective_profiling(monkeypatch, selected):
+    from deepspeed.comm import comm
+
+    barrier = Mock(return_value='done')
+    backend = SimpleNamespace(using_mpi=True, barrier=barrier)
+    monkeypatch.setattr(comm, 'cdb', backend)
+    synchronize = Mock()
+    monkeypatch.setattr(comm, 'get_accelerator', lambda: SimpleNamespace(synchronize=synchronize))
+    op_timer = Mock()
+    op_timer.elapsed.return_value = 1.0
+    timers = Mock(return_value=op_timer)
+    monkeypatch.setattr(comm, 'timers', timers)
+    logger = Mock(enabled=True, prof_all=selected, prof_ops=[], debug=False)
+    monkeypatch.setattr(comm, 'comms_logger', logger)
+
+    @comm.timed_op
+    def operation(prof=False, log_name='barrier'):
+        return 'done'
+
+    assert operation() == 'done'
+    barrier.assert_called_once_with()
+    if selected:
+        synchronize.assert_called_once_with()
+        op_timer.start.assert_called_once_with()
+        op_timer.stop.assert_called_once_with()
+        logger.append.assert_called_once()
+    else:
+        synchronize.assert_not_called()
+        timers.assert_not_called()
+        logger.append.assert_not_called()
 
 
 def test_timed_op_disabled_does_not_access_profiling_state(monkeypatch):
