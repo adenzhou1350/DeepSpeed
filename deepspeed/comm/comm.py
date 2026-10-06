@@ -70,8 +70,7 @@ class ProcessGroup():
 
 
 def _configure_using_config_file(config):
-    if config.comms_logger_enabled:
-        comms_logger.configure(config)
+    comms_logger.configure(config)
 
 
 def configure(

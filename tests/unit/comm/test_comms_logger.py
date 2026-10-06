@@ -12,6 +12,25 @@ import torch
 from deepspeed.utils.comms_logging import CommsLogger
 
 
+@pytest.mark.parametrize('initial_enabled', [False, True])
+@pytest.mark.parametrize('section', [None, {}, {'enabled': False}, {'enabled': True}])
+def test_configure_respects_comms_logger_enabled(monkeypatch, initial_enabled, section):
+    from deepspeed.comm import comm
+    from deepspeed.runtime.config import DeepSpeedConfig
+
+    logger = CommsLogger()
+    logger.enabled = initial_enabled
+    monkeypatch.setattr(comm, 'comms_logger', logger)
+    config = {'train_batch_size': 1, 'train_micro_batch_size_per_gpu': 1}
+    if section is not None:
+        config['comms_logger'] = section
+
+    comm.configure(deepspeed_config=DeepSpeedConfig(config))
+
+    # Disabled/default configuration must also reset an earlier enabled logger.
+    assert logger.enabled is (section is not None and section.get('enabled', False))
+
+
 def test_stop_profiling_comms_disables_prof_all():
     # start_profiling_comms()/stop_profiling_comms() toggle the global comm
     # profiling flag prof_all. stop_profiling_comms() must clear it; otherwise
