@@ -879,7 +879,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.use_muon:
             self.sub_groups_using_muon = []
             self.muon_beta = None
-            self.muon_ns_method = None
             for idx, param_group in enumerate(fp16_param_groups):
                 if getattr(param_group['params'][0], 'use_muon', False):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
@@ -888,7 +887,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         raise ValueError(f"All Muon parameter groups must have the same momentum (beta). "
                                          f"Found {self.muon_beta} and {group_beta}.")
                     self.muon_beta = group_beta
-                    self.muon_ns_method = param_group.get('ns_method', 'gram')
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))
         # bookkeeping related to param groups
@@ -1640,6 +1638,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not params:
             return
 
+        optimizer_group = self.optimizer.param_groups[self.sub_group_to_group_id[i]]
+
         momentum_buffer = []
         if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
             # swap-in once, keep resident through update + writeback
@@ -1686,7 +1686,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 update = muon_update(g,
                                      m,
                                      beta=self.muon_beta,
-                                     ns_method=getattr(self, 'muon_ns_method', 'gram'),
+                                     ns_method=optimizer_group.get('ns_method', 'gram'),
                                      num_heads=getattr(param, 'muon_num_heads', None))
                 g.data.copy_(update, non_blocking=False)
 

@@ -107,6 +107,55 @@ def _train(zero_stage,
 class TestZero3MuonOncePerStep(DistributedTest):
     world_size = 2
 
+    @pytest.mark.world_size([1, 2])
+    @pytest.mark.parametrize("methods", [("gram", "standard"), ("standard", "gram"), ("gram", "gram"), (None, None)])
+    def test_parameter_group_ns_methods_match_unpartitioned_muon(self, methods):
+        """The last trainable group's NS method must not replace earlier groups' methods."""
+        from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
+
+        device = get_accelerator().current_device_name()
+
+        def make_model_and_optimizer():
+            torch.manual_seed(19)
+            model = torch.nn.Sequential(torch.nn.Linear(16, 32, bias=False), torch.nn.Linear(32, 16, bias=False))
+            model.register_parameter("frozen", torch.nn.Parameter(torch.ones(1), requires_grad=False))
+            model.to(device)
+            groups = [dict(params=[model.frozen], use_muon=False)]
+            for layer, method in zip(model, methods):
+                layer.weight.use_muon = True
+                group = dict(params=[layer.weight], use_muon=True)
+                if method is not None:
+                    group["ns_method"] = method
+                groups.append(group)
+            return model, MuonWithAuxAdam(groups, adam_optimizer=torch.optim.AdamW)
+
+        model, optimizer = make_model_and_optimizer()
+        reference, reference_optimizer = make_model_and_optimizer()
+        config = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_clipping": 0.0,
+            "zero_allow_untested_optimizer": True,
+            "zero_optimization": {
+                "stage": 3,
+                "reduce_scatter": False,
+                "sub_group_size": 1,
+            },
+        }
+        engine, *_ = deepspeed.initialize(model=model, optimizer=optimizer, config=config)
+        generator = torch.Generator().manual_seed(23)
+        for _ in range(2):
+            x = torch.randn(2, 16, generator=generator).to(device)
+            y = torch.randn(2, 16, generator=generator).to(device)
+            reference_optimizer.zero_grad()
+            torch.nn.functional.mse_loss(reference(x), y).backward()
+            reference_optimizer.step()
+            engine.backward(torch.nn.functional.mse_loss(engine(x), y))
+            engine.step()
+        with deepspeed.zero.GatheredParameters(list(model.parameters())):
+            for actual, expected in zip(model.parameters(), reference.parameters()):
+                # Compiled half-precision NS can round differently on ZeRO's gradient buffers.
+                torch.testing.assert_close(actual, expected, rtol=0, atol=1e-3)
+
     def test_newton_schulz_runs_once_per_matrix_per_step(self, monkeypatch):
         calls = []
         for name in ("zeropower_via_gram_newtonschulz", "zeropower_via_newtonschulz5"):
