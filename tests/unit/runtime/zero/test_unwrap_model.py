@@ -3,6 +3,10 @@
 
 # DeepSpeed Team
 
+from contextlib import nullcontext
+from copy import deepcopy
+
+import pytest
 import torch
 
 import deepspeed
@@ -89,5 +93,37 @@ class TestUnwrapModelTraceInvalidate(DistributedTest):
             pass
 
         loss = engine(x, y)
+        engine.backward(loss)
+        engine.step()
+
+    @pytest.mark.parametrize("raise_during_generation", [False, True])
+    def test_generation_error(self, raise_during_generation):
+        test_config = deepcopy(config)
+        # Hook recovery must not depend on a native optimizer extension.
+        test_config["optimizer"]["params"]["torch_adam"] = True
+        test_config["zero_optimization"]["stage3_max_reuse_distance"] = 0
+        test_config["zero_optimization"]["stage3_prefetch_bucket_size"] = 0
+        model = SimpleModel(hidden_dim=100)
+        engine, _, _, _ = deepspeed.initialize(args=None, model=model, config=test_config)
+
+        x = torch.randn(2, 100, device=engine.device, dtype=preferred_dtype())
+        y = torch.empty(2, dtype=torch.long, device=engine.device).random_(100)
+        loss = engine(x, y)
+        # Non-persistent weights must be released after forward, not retained
+        # until optimizer.step() by a missing post-forward hook.
+        assert model.linears[0].weight.numel() == 0
+        engine.backward(loss)
+        engine.step()
+
+        error_context = pytest.raises(ValueError,
+                                      match="generation failed") if raise_during_generation else nullcontext()
+        with error_context:
+            with unwrap_model_for_generation(engine):
+                if raise_during_generation:
+                    raise ValueError("generation failed")
+
+        loss = engine(x, y)
+        assert torch.isfinite(loss)
+        assert model.linears[0].weight.numel() == 0
         engine.backward(loss)
         engine.step()

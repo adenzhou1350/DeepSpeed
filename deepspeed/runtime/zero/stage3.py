@@ -114,14 +114,15 @@ def unwrap_model_for_generation(model):
         optimizer_offload.forward_hooks = []
         optimizer_offload.backward_hooks = []
 
-        yield model
-
-        # Adds the optimizer hooks from a DeepSpeed ZeRO-3 model.
-        if model.optimizer is not None and hasattr(model.optimizer, "parameter_offload"):
-            optimizer_offload = model.optimizer.parameter_offload
-        elif model.optimizer is not None:
-            optimizer_offload = model.optimizer
-        optimizer_offload._register_deepspeed_module(optimizer_offload.module)
+        try:
+            yield model
+        finally:
+            # Restore training hooks even if generation raises.
+            if model.optimizer is not None and hasattr(model.optimizer, "parameter_offload"):
+                optimizer_offload = model.optimizer.parameter_offload
+            elif model.optimizer is not None:
+                optimizer_offload = model.optimizer
+            optimizer_offload._register_deepspeed_module(optimizer_offload.module)
     return
 
 
