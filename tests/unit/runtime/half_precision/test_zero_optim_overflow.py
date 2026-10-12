@@ -280,7 +280,8 @@ class TestZeROBFloat16(DistributedTest):
         assert model.skipped_steps == 0
         assert all([not has_inf_or_nan(p) for p in model.parameters()])
 
-    def test_detect_grad_overflow(self, zero_stage, offload_optimizer):
+    @pytest.mark.parametrize("gradient_clipping", [0.0, 1.0])
+    def test_detect_grad_overflow(self, zero_stage, offload_optimizer, gradient_clipping):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
@@ -297,6 +298,7 @@ class TestZeROBFloat16(DistributedTest):
                 "enabled": True,
                 "check_grad_overflow": True
             },
+            "gradient_clipping": gradient_clipping,
             "zero_optimization": {
                 "stage": zero_stage,
             }
@@ -322,7 +324,8 @@ class TestZeROBFloat16(DistributedTest):
 
         assert all([not has_inf_or_nan(p) for p in model.parameters()])
 
-    def test_ignore_grad_overflow(self, zero_stage, offload_optimizer):
+    @pytest.mark.parametrize("gradient_clipping", [0.0, 1.0])
+    def test_ignore_grad_overflow(self, zero_stage, offload_optimizer, gradient_clipping):
         if not get_accelerator().is_bf16_supported():
             pytest.skip("bf16 is not supported")
 
@@ -339,6 +342,7 @@ class TestZeROBFloat16(DistributedTest):
                 "enabled": True,
                 "check_grad_overflow": False
             },
+            "gradient_clipping": gradient_clipping,
             "zero_optimization": {
                 "stage": zero_stage,
             }
