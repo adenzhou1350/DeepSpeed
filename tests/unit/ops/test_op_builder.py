@@ -7,6 +7,7 @@ import os
 import sys
 import subprocess
 import importlib.util
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -47,6 +48,24 @@ def make_builder(**overrides):
     for key, value in overrides.items():
         setattr(builder, key, value)
     return builder
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir() or shutil.which("cc") is None,
+                    reason="requires procfs and a C compiler")
+@pytest.mark.parametrize("verbose", [False, True])
+@pytest.mark.parametrize("function, expected", [("abort", True), ("deepspeed_missing_probe_symbol", False),
+                                                ("not a valid C function", False)])
+def test_has_function_preserves_file_descriptors(function, expected, verbose, capfd):
+    builder = make_builder()
+    stderr_before = os.fstat(sys.stderr.fileno())
+    descriptors_before = len(os.listdir("/proc/self/fd"))
+
+    for _ in range(3):
+        assert builder.has_function(function, libraries=[], verbose=verbose) is expected
+
+    stderr_after = os.fstat(sys.stderr.fileno())
+    assert (stderr_after.st_dev, stderr_after.st_ino) == (stderr_before.st_dev, stderr_before.st_ino)
+    assert len(os.listdir("/proc/self/fd")) == descriptors_before
 
 
 def assert_jit_uses_explicit_arch_list(builder, expected_arch_list, env_updates=None):

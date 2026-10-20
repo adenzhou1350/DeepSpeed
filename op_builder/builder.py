@@ -411,6 +411,7 @@ class OpBuilder(ABC):
             # Restore stderr file descriptor and close the stderr redirect file.
             if oldstderr is not None:
                 os.dup2(oldstderr, sys.stderr.fileno())
+                os.close(oldstderr)
             if filestderr is not None:
                 filestderr.close()
 
